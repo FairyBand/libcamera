@@ -330,12 +330,28 @@ int ControlSerializer::serialize(const ControlList &list,
 	if (list.infoMap()) {
 		auto iter = infoMapHandles_.find(list.infoMap());
 		if (iter == infoMapHandles_.end()) {
-			LOG(Serializer, Error)
-				<< "Can't serialize ControlList: unknown ControlInfoMap";
-			return -ENOENT;
-		}
+			/*
+			 * Handles are bound to the peer deserializer, so a
+			 * ControlInfoMap copied from a deserialized one, as
+			 * IPA modules keep in configure(), carries no handle
+			 * of its own. Recover the handle of the registered
+			 * ControlInfoMap sharing its ControlIdMap.
+			 */
+			for (const auto &[registered, registeredHandle] : infoMapHandles_) {
+				if (registered->idmap() == list.infoMap()->idmap()) {
+					infoMapHandle = registeredHandle;
+					break;
+				}
+			}
 
-		infoMapHandle = iter->second;
+			if (!infoMapHandle) {
+				LOG(Serializer, Error)
+					<< "Can't serialize ControlList: unknown ControlInfoMap";
+				return -ENOENT;
+			}
+		} else {
+			infoMapHandle = iter->second;
+		}
 	} else {
 		infoMapHandle = 0;
 	}
@@ -622,9 +638,18 @@ ControlList ControlSerializer::deserialize<ControlList>(ByteStreamBuffer &buffer
 
 		case IPA_CONTROL_ID_MAP_V4L2:
 		default:
+			/*
+			 * A list of V4L2 controls can only be interpreted with
+			 * the sensor ControlInfoMap it refers to. If that map is
+			 * not available, the sender failed to send it and we
+			 * cannot reconstruct the list. Drop the list instead of
+			 * aborting: the proxy worker hosts the whole software
+			 * ISP, so taking it down would leave the camera stream
+			 * unconfigured for every client.
+			 */
 			if (hdr->entries > 0)
-				LOG(Serializer, Fatal)
-					<< "A list of V4L2 controls requires a ControlInfoMap";
+				LOG(Serializer, Error)
+					<< "Can't deserialize ControlList of V4L2 controls: no ControlInfoMap";
 
 			return {};
 		}
@@ -672,7 +697,20 @@ ControlList ControlSerializer::deserialize<ControlList>(ByteStreamBuffer &buffer
  */
 bool ControlSerializer::isCached(const ControlInfoMap &infoMap)
 {
-	return infoMapHandles_.count(&infoMap);
+	if (infoMapHandles_.count(&infoMap))
+		return true;
+
+	/*
+	 * A copy of a deserialized ControlInfoMap has no handle of its own
+	 * but shares its ControlIdMap, and can reuse the handle assigned to
+	 * the original.
+	 */
+	for (const auto &[registered, registeredHandle] : infoMapHandles_) {
+		if (registered->idmap() == infoMap.idmap())
+			return true;
+	}
+
+	return false;
 }
 
 } /* namespace libcamera */
