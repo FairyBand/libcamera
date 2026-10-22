@@ -169,6 +169,34 @@ protected:
 			return TestFail;
 		}
 
+		/*
+		 * A default-constructed list, as applications pass to
+		 * Camera::start(), has no ControlIdMap. It must be transferred
+		 * as a list of libcamera controls.
+		 */
+		ControlList defaultList;
+		defaultList.set(controls::AeEnable, true);
+
+		size = serializer.binarySize(defaultList);
+		infoData.resize(size);
+		buffer = ByteStreamBuffer(infoData.data(), infoData.size());
+
+		ret = serializer.serialize(defaultList, buffer);
+		if (ret < 0 || buffer.overflow()) {
+			cerr << "Failed to serialize default ControlList" << endl;
+			return TestFail;
+		}
+
+		buffer = ByteStreamBuffer(const_cast<const uint8_t *>(infoData.data()),
+					  infoData.size());
+		newList = deserializer.deserialize<ControlList>(buffer);
+		if (buffer.overflow() || newList.idMap() != &controls::controls ||
+		    newList.get(controls::AeEnable) != std::optional<bool>(true)) {
+			cerr << "Default ControlList not deserialized as libcamera controls"
+			     << endl;
+			return TestFail;
+		}
+
 		return TestPass;
 	}
 };

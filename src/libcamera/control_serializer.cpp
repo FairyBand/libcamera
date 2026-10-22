@@ -330,35 +330,28 @@ int ControlSerializer::serialize(const ControlList &list,
 	if (list.infoMap()) {
 		auto iter = infoMapHandles_.find(list.infoMap());
 		if (iter == infoMapHandles_.end()) {
-			/*
-			 * Handles are bound to the peer deserializer, so a
-			 * ControlInfoMap copied from a deserialized one, as
-			 * IPA modules keep in configure(), carries no handle
-			 * of its own. Recover the handle of the registered
-			 * ControlInfoMap sharing its ControlIdMap.
-			 */
-			for (const auto &[registered, registeredHandle] : infoMapHandles_) {
-				if (registered->idmap() == list.infoMap()->idmap()) {
-					infoMapHandle = registeredHandle;
-					break;
-				}
-			}
-
-			if (!infoMapHandle) {
-				LOG(Serializer, Error)
-					<< "Can't serialize ControlList: unknown ControlInfoMap";
-				return -ENOENT;
-			}
-		} else {
-			infoMapHandle = iter->second;
+			LOG(Serializer, Error)
+				<< "Can't serialize ControlList: unknown ControlInfoMap";
+			return -ENOENT;
 		}
+
+		infoMapHandle = iter->second;
 	} else {
 		infoMapHandle = 0;
 	}
 
+	/*
+	 * A default-constructed ControlList has neither a ControlInfoMap nor
+	 * a ControlIdMap, but can still be populated with libcamera controls,
+	 * as applications commonly do for the list passed to Camera::start().
+	 * V4L2 controls can only be interpreted through the ControlInfoMap of
+	 * their device, so a list without either map can only carry libcamera
+	 * controls. Serialize it as such instead of tagging it as a V4L2 list,
+	 * which the peer can't deserialize without a ControlInfoMap.
+	 */
 	const ControlIdMap *idmap = list.idMap();
 	enum ipa_controls_id_map_type idMapType;
-	if (idmap == &controls::controls)
+	if (idmap == &controls::controls || (!idmap && !list.infoMap()))
 		idMapType = IPA_CONTROL_ID_MAP_CONTROLS;
 	else if (idmap == &properties::properties)
 		idMapType = IPA_CONTROL_ID_MAP_PROPERTIES;
@@ -639,17 +632,14 @@ ControlList ControlSerializer::deserialize<ControlList>(ByteStreamBuffer &buffer
 		case IPA_CONTROL_ID_MAP_V4L2:
 		default:
 			/*
-			 * A list of V4L2 controls can only be interpreted with
-			 * the sensor ControlInfoMap it refers to. If that map is
-			 * not available, the sender failed to send it and we
-			 * cannot reconstruct the list. Drop the list instead of
-			 * aborting: the proxy worker hosts the whole software
-			 * ISP, so taking it down would leave the camera stream
-			 * unconfigured for every client.
+			 * Drop the list instead of aborting. In an isolated
+			 * IPA the deserializer runs in the proxy worker, which
+			 * hosts the whole IPA, and aborting it would leave the
+			 * camera unusable for every client.
 			 */
 			if (hdr->entries > 0)
 				LOG(Serializer, Error)
-					<< "Can't deserialize ControlList of V4L2 controls: no ControlInfoMap";
+					<< "A list of V4L2 controls requires a ControlInfoMap";
 
 			return {};
 		}
@@ -697,20 +687,7 @@ ControlList ControlSerializer::deserialize<ControlList>(ByteStreamBuffer &buffer
  */
 bool ControlSerializer::isCached(const ControlInfoMap &infoMap)
 {
-	if (infoMapHandles_.count(&infoMap))
-		return true;
-
-	/*
-	 * A copy of a deserialized ControlInfoMap has no handle of its own
-	 * but shares its ControlIdMap, and can reuse the handle assigned to
-	 * the original.
-	 */
-	for (const auto &[registered, registeredHandle] : infoMapHandles_) {
-		if (registered->idmap() == infoMap.idmap())
-			return true;
-	}
-
-	return false;
+	return infoMapHandles_.count(&infoMap);
 }
 
 } /* namespace libcamera */
